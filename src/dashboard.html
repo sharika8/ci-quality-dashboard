@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QA Quality Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e2e8f0}
+    header{background:linear-gradient(135deg,#1e3a5f,#0d2137);padding:1.5rem 2rem;border-bottom:1px solid #1e40af;display:flex;align-items:center;justify-content:space-between}
+    header h1{font-size:1.5rem;color:#93c5fd}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;padding:1.5rem 2rem;background:#151820}
+    .stat{background:#1e293b;border-radius:10px;padding:1rem;text-align:center;border:1px solid #334155}
+    .stat .n{font-size:2rem;font-weight:700}
+    .stat .lbl{font-size:.7rem;text-transform:uppercase;color:#64748b;margin-top:.3rem}
+    .green{color:#4ade80}.red{color:#f87171}.yellow{color:#facc15}.blue{color:#60a5fa}
+    .repos{padding:1.5rem 2rem;display:flex;flex-direction:column;gap:1rem}
+    .card{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden}
+    .card-header{display:flex;align-items:center;justify-content:space-between;padding:.85rem 1.25rem;border-bottom:1px solid #334155}
+    .repo-name{font-weight:600;color:#93c5fd;font-size:.95rem}
+    .jobs{display:flex;flex-wrap:wrap;gap:.5rem;padding:.75rem 1.25rem}
+    .chip{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:.3rem .65rem;font-size:.75rem}
+    .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:.5rem}
+    .dot-green{background:#4ade80}.dot-red{background:#f87171}.dot-yellow{background:#facc15}.dot-gray{background:#475569}
+    .filter-bar{display:flex;gap:.5rem;padding:.75rem 2rem;background:#0f1117;border-bottom:1px solid #1e293b;flex-wrap:wrap}
+    .btn{padding:.3rem .75rem;border-radius:16px;border:1px solid #334155;background:#1e293b;color:#94a3b8;cursor:pointer;font-size:.78rem}
+    .btn:hover,.btn.active{background:#1e40af;border-color:#3b82f6;color:#fff}
+    .prompt{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:1rem}
+    .prompt h2{color:#93c5fd}.prompt p{color:#64748b;max-width:420px;text-align:center;font-size:.9rem}
+    input{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:.6rem 1rem;color:#e2e8f0;font-size:.9rem;width:360px}
+    input:focus{outline:none;border-color:#3b82f6}
+    .btn-primary{background:#1e40af;border:none;color:#fff;padding:.6rem 1.5rem;border-radius:8px;cursor:pointer;font-size:.9rem}
+    .spinner{border:3px solid #1e293b;border-top:3px solid #3b82f6;border-radius:50%;width:24px;height:24px;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+    .empty{text-align:center;padding:3rem;color:#475569}
+    .meta{font-size:.75rem;color:#475569;margin-top:.15rem}
+    .trends{display:flex;gap:.25rem;align-items:flex-end;height:28px}
+    .bar{width:6px;border-radius:2px 2px 0 0}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const {useState,useEffect,useCallback} = React;
+
+function timeAgo(d){
+  const m=Math.floor((Date.now()-new Date(d))/60000);
+  if(m<1)return"just now";if(m<60)return m+"m ago";
+  const h=Math.floor(m/60);if(h<24)return h+"h ago";
+  return Math.floor(h/24)+"d ago";
+}
+
+function StatusDot({c}){
+  const cls=c==="success"?"dot-green":c==="failure"?"dot-red":c==="cancelled"?"dot-yellow":"dot-gray";
+  return React.createElement("span",{className:"dot "+cls});
+}
+
+async function apiFetch(token,url){
+  const r=await fetch("https://api.github.com"+url,{headers:{"Authorization":"token "+token,"Accept":"application/vnd.github.v3+json"}});
+  return r.ok?r.json():null;
+}
+
+function App(){
+  const [token,setToken]=useState(localStorage.getItem("gh_token")||"");
+  const [owner,setOwner]=useState(localStorage.getItem("gh_owner")||"");
+  const [iToken,setIToken]=useState("");
+  const [iOwner,setIOwner]=useState("");
+  const [data,setData]=useState({repos:[],runs:{}});
+  const [loading,setLoading]=useState(false);
+  const [filter,setFilter]=useState("all");
+  const [err,setErr]=useState(null);
+  const [refreshed,setRefreshed]=useState(null);
+
+  const load=useCallback(async(tok,own)=>{
+    setLoading(true);setErr(null);
+    try{
+      const repos=await apiFetch(tok,"/users/"+own+"/repos?per_page=50&sort=updated");
+      if(!repos){throw new Error("Failed to fetch repos — check token and username");}
+      const runMap={};
+      for(let i=0;i<repos.length;i+=5){
+        await Promise.all(repos.slice(i,i+5).map(async repo=>{
+          const d=await apiFetch(tok,"/repos/"+own+"/"+repo.name+"/actions/runs?per_page=5");
+          if(d&&d.workflow_runs?.length){
+            const run=d.workflow_runs[0];
+            const jd=await apiFetch(tok,"/repos/"+own+"/"+repo.name+"/actions/runs/"+run.id+"/jobs");
+            runMap[repo.name]={run,jobs:jd?.jobs||[],runs:d.workflow_runs};
+          }
+        }));
+      }
+      setData({repos,runs:runMap});
+      setRefreshed(new Date());
+    }catch(e){setErr(e.message);}
+    setLoading(false);
+  },[]);
+
+  const connect=()=>{
+    if(!iToken||!iOwner)return;
+    localStorage.setItem("gh_token",iToken);localStorage.setItem("gh_owner",iOwner);
+    setToken(iToken);setOwner(iOwner);load(iToken,iOwner);
+  };
+
+  const disconnect=()=>{
+    localStorage.removeItem("gh_token");localStorage.removeItem("gh_owner");
+    setToken("");setOwner("");setData({repos:[],runs:{}});
+  };
+
+  useEffect(()=>{if(token&&owner)load(token,owner);},[]);
+
+  if(!token||!owner){
+    return React.createElement("div",{className:"prompt"},
+      React.createElement("h2",null,"🔬 QA Quality Dashboard"),
+      React.createElement("p",null,"Connect your GitHub account to visualise CI status across all your QA repositories."),
+      React.createElement("input",{type:"text",placeholder:"GitHub username",value:iOwner,onChange:e=>setIOwner(e.target.value)}),
+      React.createElement("input",{type:"password",placeholder:"Personal access token (public_repo scope)",value:iToken,onChange:e=>setIToken(e.target.value),onKeyDown:e=>e.key==="Enter"&&connect()}),
+      React.createElement("button",{className:"btn-primary",onClick:connect},"Connect"),
+      err&&React.createElement("p",{style:{color:"#f87171",fontSize:".85rem"}},err)
+    );
+  }
+
+  const {repos,runs}=data;
+  const withRuns=repos.filter(r=>runs[r.name]?.run);
+  const passing=withRuns.filter(r=>runs[r.name].run.conclusion==="success").length;
+  const failing=withRuns.filter(r=>runs[r.name].run.conclusion==="failure").length;
+  const passRate=withRuns.length?Math.round(passing/withRuns.length*100):0;
+
+  const filtered=repos.filter(r=>{
+    const c=runs[r.name]?.run?.conclusion;
+    if(filter==="passing")return c==="success";
+    if(filter==="failing")return c==="failure";
+    if(filter==="no_ci")return!runs[r.name]?.run;
+    return true;
+  });
+
+  return React.createElement("div",null,
+    React.createElement("header",null,
+      React.createElement("div",null,
+        React.createElement("h1",null,"🔬 QA Quality Dashboard"),
+        React.createElement("div",{style:{color:"#64748b",fontSize:".8rem",marginTop:".2rem"}},
+          owner+" · "+(refreshed?"Updated "+timeAgo(refreshed):"")
+        )
+      ),
+      React.createElement("div",{style:{display:"flex",gap:".75rem",alignItems:"center"}},
+        loading&&React.createElement("div",{className:"spinner"}),
+        !loading&&React.createElement("button",{className:"btn",onClick:()=>load(token,owner)},"Refresh"),
+        React.createElement("button",{className:"btn",onClick:disconnect},"Disconnect")
+      )
+    ),
+    React.createElement("div",{className:"grid"},
+      [["Repos",repos.length,"blue"],["Passing",passing,"green"],["Failing",failing,"red"],["Pass Rate",passRate+"%",passRate>=80?"green":passRate>=50?"yellow":"red"],["No CI",repos.length-withRuns.length,"yellow"]]
+      .map(([lbl,n,cls])=>React.createElement("div",{key:lbl,className:"stat"},
+        React.createElement("div",{className:"n "+cls},n),
+        React.createElement("div",{className:"lbl"},lbl)
+      ))
+    ),
+    React.createElement("div",{className:"filter-bar"},
+      [["all","All ("+repos.length+")"],["passing","Passing ("+passing+")"],["failing","Failing ("+failing+")"],["no_ci","No CI ("+(repos.length-withRuns.length)+")"]]
+      .map(([f,label])=>React.createElement("button",{key:f,className:"btn"+(filter===f?" active":""),onClick:()=>setFilter(f)},label))
+    ),
+    err&&React.createElement("p",{style:{color:"#f87171",padding:"1rem 2rem"}},err),
+    React.createElement("div",{className:"repos"},
+      filtered.length===0&&React.createElement("div",{className:"empty"},"No repos match this filter."),
+      filtered.map(repo=>{
+        const rd=runs[repo.name];
+        const run=rd?.run;
+        const jobs=rd?.jobs||[];
+        const bars=(rd?.runs||[]).slice(0,8).map(r=>r.conclusion==="success"?"#4ade80":r.conclusion==="failure"?"#f87171":"#475569").reverse();
+        return React.createElement("div",{key:repo.id,className:"card"},
+          React.createElement("div",{className:"card-header"},
+            React.createElement("div",null,
+              React.createElement("div",{style:{display:"flex",alignItems:"center"}},
+                run&&React.createElement(StatusDot,{c:run.conclusion}),
+                React.createElement("a",{className:"repo-name",href:repo.html_url,target:"_blank"},repo.name)
+              ),
+              React.createElement("div",{className:"meta"},
+                (repo.description||"No description").substring(0,60),
+                run?" · "+timeAgo(run.updated_at):""
+              )
+            ),
+            React.createElement("div",{className:"trends"},
+              bars.map((bg,i)=>React.createElement("div",{key:i,className:"bar",style:{height:(10+(i+1)*2.2)+"px",background:bg}}))
+            )
+          ),
+          jobs.length>0&&React.createElement("div",{className:"jobs"},
+            jobs.slice(0,8).map((job,i)=>{
+              const icon=job.conclusion==="success"?"✅":job.conclusion==="failure"?"❌":job.status==="in_progress"?"🔄":"⏭";
+              return React.createElement("div",{key:i,className:"chip"},icon+" "+job.name);
+            })
+          ),
+          !run&&React.createElement("div",{style:{padding:".75rem 1.25rem",color:"#475569",fontSize:".8rem"}},"No CI runs")
+        );
+      })
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
